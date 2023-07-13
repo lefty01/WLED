@@ -90,18 +90,18 @@ Segment::Segment(const Segment &orig) {
   if (orig.name) { name = new char[strlen(orig.name)+1]; if (name) strcpy(name, orig.name); }
   if (orig.data) { if (allocateData(orig._dataLen)) memcpy(data, orig.data, orig._dataLen); }
   if (orig._t)   { _t = new Transition(orig._t->_dur, orig._t->_briT, orig._t->_cctT, orig._t->_colorT); }
-  if (orig.leds && !Segment::_globalLeds) { leds = (CRGB*)malloc(sizeof(CRGB)*length()); if (leds) memcpy(leds, orig.leds, sizeof(CRGB)*length()); }
+  if (orig.leds && !Segment::_globalLeds && length() > 0) { leds = (CRGB*)malloc(sizeof(CRGB)*length()); if (leds) memcpy(leds, orig.leds, sizeof(CRGB)*length()); }
 }
 
 // move constructor
 Segment::Segment(Segment &&orig) noexcept {
   //DEBUG_PRINTLN(F("-- Move segment constructor --"));
   memcpy((void*)this, (void*)&orig, sizeof(Segment));
+  orig.leds = nullptr;
   orig.name = nullptr;
   orig.data = nullptr;
   orig._dataLen = 0;
   orig._t   = nullptr;
-  orig.leds = nullptr;
 }
 
 // copy assignment
@@ -111,7 +111,7 @@ Segment& Segment::operator= (const Segment &orig) {
     // clean destination
     if (name) delete[] name;
     if (_t)   delete _t;
-    if (leds && !Segment::_globalLeds) free(leds);
+    if (leds && !Segment::_globalLeds) {free(leds); leds=nullptr;} 
     deallocateData();
     // copy source
     memcpy((void*)this, (void*)&orig, sizeof(Segment));
@@ -125,7 +125,7 @@ Segment& Segment::operator= (const Segment &orig) {
     if (orig.name) { name = new char[strlen(orig.name)+1]; if (name) strcpy(name, orig.name); }
     if (orig.data) { if (allocateData(orig._dataLen)) memcpy(data, orig.data, orig._dataLen); }
     if (orig._t)   { _t = new Transition(orig._t->_dur, orig._t->_briT, orig._t->_cctT, orig._t->_colorT); }
-    if (orig.leds && !Segment::_globalLeds) { leds = (CRGB*)malloc(sizeof(CRGB)*length()); if (leds) memcpy(leds, orig.leds, sizeof(CRGB)*length()); }
+    if (orig.leds && !Segment::_globalLeds && length() > 0) { leds = (CRGB*)malloc(sizeof(CRGB)*length()); if (leds) memcpy(leds, orig.leds, sizeof(CRGB)*length()); }
   }
   return *this;
 }
@@ -137,7 +137,7 @@ Segment& Segment::operator= (Segment &&orig) noexcept {
     if (name) delete[] name; // free old name
     deallocateData(); // free old runtime data
     if (_t) delete _t;
-    if (leds && !Segment::_globalLeds) free(leds);
+    if (leds && !Segment::_globalLeds) {free(leds); leds=nullptr;}
     memcpy((void*)this, (void*)&orig, sizeof(Segment));
     orig.name = nullptr;
     orig.data = nullptr;
@@ -547,6 +547,7 @@ uint16_t Segment::virtualLength() const {
   }
 #endif
   uint16_t groupLen = groupLength();
+  if (groupLen < 1) groupLen = 1;          // prevent division by zero - better safe than sorry ...
   uint16_t vLength = (length() + groupLen - 1) / groupLen;
   if (mirror) vLength = (vLength + 1) /2;  // divide by 2 if mirror, leave at least a single LED
   return vLength;
@@ -729,7 +730,7 @@ uint32_t Segment::getPixelColor(int i)
   i += start;
   /* offset/phase */
   i += offset;
-  if (i >= stop) i -= length();
+  if ((i >= stop) && (stop>0)) i -= length(); // avoids negative pixel index (stop = 0 is a possible value)
   return strip.getPixelColor(i);
 }
 
@@ -886,6 +887,7 @@ void Segment::fade_out(uint8_t rate) {
 
 // fades all pixels to black using nscale8()
 void Segment::fadeToBlackBy(uint8_t fadeBy) {
+  if (fadeBy == 0) return;   // optimization - no scaling to apply
   const uint16_t cols = is2D() ? virtualWidth() : virtualLength();
   const uint16_t rows = virtualHeight(); // will be 1 for 1D
 
@@ -900,23 +902,26 @@ void Segment::fadeToBlackBy(uint8_t fadeBy) {
  */
 void Segment::blur(uint8_t blur_amount)
 {
+  if (blur_amount == 0) return; // optimization: 0 means "don't blur"
 #ifndef WLED_DISABLE_2D
   if (is2D()) {
     // compatibility with 2D
-    const uint16_t cols = virtualWidth();
-    const uint16_t rows = virtualHeight();
-    for (uint16_t i = 0; i < rows; i++) blurRow(i, blur_amount); // blur all rows
-    for (uint16_t k = 0; k < cols; k++) blurCol(k, blur_amount); // blur all columns
+    const uint_fast16_t cols = virtualWidth();
+    const uint_fast16_t rows = virtualHeight();
+    for (uint_fast16_t i = 0; i < rows; i++) blurRow(i, blur_amount); // blur all rows
+    for (uint_fast16_t k = 0; k < cols; k++) blurCol(k, blur_amount); // blur all columns
     return;
   }
 #endif
   uint8_t keep = 255 - blur_amount;
   uint8_t seep = blur_amount >> 1;
   CRGB carryover = CRGB::Black;
-  for(uint16_t i = 0; i < virtualLength(); i++)
+  uint_fast16_t vlength = virtualLength();
+  for(uint_fast16_t i = 0; i < vlength; i++)
   {
     CRGB cur = CRGB(getPixelColor(i));
     CRGB part = cur;
+    uint32_t before = uint32_t(cur); // remember color before blur
     part.nscale8(seep);
     cur.nscale8(keep);
     cur += carryover;
@@ -925,9 +930,10 @@ void Segment::blur(uint8_t blur_amount)
       uint8_t r = R(c);
       uint8_t g = G(c);
       uint8_t b = B(c);
-      setPixelColor(i-1, qadd8(r, part.red), qadd8(g, part.green), qadd8(b, part.blue));
+      setPixelColor((uint16_t)(i-1), qadd8(r, part.red), qadd8(g, part.green), qadd8(b, part.blue));
     }
-    setPixelColor(i,cur.red, cur.green, cur.blue);
+    if (before != uint32_t(cur))     // optimization: only set pixel if color has changed
+      setPixelColor((uint16_t)i,cur.red, cur.green, cur.blue);
     carryover = part;
   }
 }
@@ -1077,7 +1083,7 @@ void WS2812FX::finalizeInit(void)
     //else
     //#endif
       Segment::_globalLeds = (CRGB*) malloc(arrSize);
-    memset(Segment::_globalLeds, 0, arrSize);
+    if (Segment::_globalLeds && (arrSize > 0)) memset(Segment::_globalLeds, 0, arrSize);
   }
 
   //segments are created in makeAutoSegments();
@@ -1222,7 +1228,8 @@ void WS2812FX::estimateCurrentAndLimitBri() {
   }
 
   uint32_t powerSum0 = powerSum;
-  powerSum *= _brightness;
+  //powerSum *= _brightness; // for NPBrightnessBus
+  powerSum *= 255;           // no need to scale down powerSum - NPB-LG getPixelColor returns colors scaled down by brightness
 
   if (powerSum > powerBudget) //scale brightness down to stay in current limit
   {
@@ -1230,11 +1237,14 @@ void WS2812FX::estimateCurrentAndLimitBri() {
     uint16_t scaleI = scale * 255;
     uint8_t scaleB = (scaleI > 255) ? 255 : scaleI;
     uint8_t newBri = scale8(_brightness, scaleB);
-    busses.setBrightness(newBri); //to keep brightness uniform, sets virtual busses too
-    currentMilliamps = (powerSum0 * newBri) / puPerMilliamp;
+    // to keep brightness uniform, sets virtual busses too - softhack007: apply reductions immediately
+    if (scaleB < 255) busses.setBrightness(scaleB, true); // NPB-LG has already applied brightness, so its suffifient to post-apply scaling ==> use scaleB instead of newBri
+    busses.setBrightness(newBri, false);                  // set new brightness for next frame
+    //currentMilliamps = (powerSum0 * newBri) / puPerMilliamp; // for NPBrightnessBus
+    currentMilliamps = (powerSum0 * scaleB) / puPerMilliamp;   // for NPBus-LG
   } else {
     currentMilliamps = powerSum / puPerMilliamp;
-    busses.setBrightness(_brightness);
+    busses.setBrightness(_brightness, false);            // set new brightness for next frame
   }
   currentMilliamps += MA_FOR_ESP; //add power of ESP back to estimate
   currentMilliamps += pLen; //add standby power back to estimate
