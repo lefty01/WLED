@@ -907,9 +907,10 @@ void RotaryEncoderUIUsermod::changeHue(bool increase){
   }
   display->updateRedrawTime();
 #endif
-  currentHue1 = max(min((increase ? currentHue1+fadeAmount : currentHue1-fadeAmount), 255), 0);
+  // for hue I prefer to cycle the wheel instead of capping
+  currentHue1 = (increase ? currentHue1+fadeAmount : currentHue1-fadeAmount) % 256;
   colorHStoRGB(currentHue1*256, currentSat1, col);
-  stateChanged = true; 
+  stateChanged = true;
   if (applyToAll) {
     for (byte i=0; i<strip.getSegmentsNum(); i++) {
       Segment& seg = strip.getSegment(i);
